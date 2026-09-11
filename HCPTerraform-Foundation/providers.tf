@@ -1,0 +1,3 @@
+provider "azuredevops" {}
+
+provider "tfe" {}

@@ -1,0 +1,125 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# merge-pipeline.yml
+#
+# Triggers on every merge to main. Reads the latest semver tag in the
+# repository, determines the bump type from the PR title (read from the merge
+# commit message), and pushes the new tag. The pushed tag then triggers
+# tag-pipeline.yml, which publishes the new version to the HCP Terraform
+# private registry.
+#
+# Bump rules (read from the merge commit message, which contains the PR title):
+#   #major  → bump major component  (e.g. v1.2.3 → v2.0.0)
+#   #minor  → bump minor component  (e.g. v1.2.3 → v1.3.0)
+#   (none)  → bump patch component  (e.g. v1.2.3 → v1.2.4)  ← default
+#
+# Equivalent of: rymndhng/release-on-push-action@v0.28.0
+#   bump_version_scheme: determined by PR title keyword
+#   tag_prefix: v
+#
+# Required pipeline variable group: "azure-devops"
+#   This variable group is created automatically by HCPTerraform-ModulesFactory via
+#   azuredevops_variable_group.azure_devops and is project-scoped, so it is available
+#   to every pipeline in the project — including pipelines in repositories created by
+#   the no-code module. The PAT reuses var.azuredevops_personal_access_token from
+#   HCPTerraform-ModulesFactory (Code: Read, Create & Manage scope covers tag pushes).
+#
+#   AZDO_PAT  (secret) – Personal Access Token with Code (Read & Write) scope,
+#                        used to push the new tag back to the repository.
+#                        The built-in $(System.AccessToken) cannot push tags
+#                        unless "Allow scripts to access the OAuth token" AND
+#                        "Contribute" permission on the repo are both enabled.
+#
+# Documentation:
+#   https://github.com/rymndhng/release-on-push-action
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/scripts/git-commands
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Tag version — PR merge to $(Build.TargetBranch)
+
+# Trigger on completed merges to main only.
+# Azure Pipelines does not expose a "PR merged" event directly; the standard
+# pattern is a CI trigger on the target branch — the pipeline only runs when
+# a commit lands on main (i.e. after a merge).
+trigger:
+  branches:
+    include:
+      - main
+  tags:
+    exclude:
+      - '*'   # do not re-trigger when this pipeline pushes the tag
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: azure-devops   # must contain AZDO_PAT (secret)
+
+jobs:
+  - job: tag_version
+    displayName: Bump version and push tag
+    steps:
+
+      - checkout: self
+        displayName: Checkout repository
+        fetchDepth: 0          # full history needed to find all existing tags
+        persistCredentials: false   # we use AZDO_PAT for the push instead
+
+      - bash: |
+          set -euo pipefail
+
+          repo_url="$(Build.Repository.Uri)"
+          # Build.Repository.Uri may include a username (e.g. https://org@dev.azure.com/...).
+          # Strip everything between "https://" and "dev.azure.com" before injecting the PAT
+          # so we don't end up with two "@" signs which git rejects as a bad hostname.
+          clean_url=$(echo "${repo_url}" | sed 's|https://[^@]*@|https://|')
+          authed_url="${clean_url/https:\/\//https:\/\/$(AZDO_PAT)@}"
+          git remote set-url origin "${authed_url}"
+
+          echo "INFO     | Fetching all tags..."
+          git fetch --tags --quiet
+
+          # Read the merge commit message — Azure DevOps sets it to the PR title
+          # (e.g. "Merged PR 42: feat: add workspace support #minor").
+          commit_msg=$(git log -1 --pretty=%s "$(Build.SourceVersion)")
+          echo "INFO     | Commit message: ${commit_msg}"
+
+          # Determine bump type from keywords in the PR title / commit message.
+          if echo "${commit_msg}" | grep -qiE '#major'; then
+            bump="major"
+          elif echo "${commit_msg}" | grep -qiE '#minor'; then
+            bump="minor"
+          else
+            bump="patch"
+          fi
+          echo "INFO     | Bump type: ${bump}"
+
+          # Find the highest existing semver tag (v<major>.<minor>.<patch>).
+          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+            | sort -t. -k1,1V -k2,2n -k3,3n \
+            | tail -n1)
+
+          if [[ -z "${latest_tag}" ]]; then
+            new_tag="v0.0.1"
+            echo "INFO     | No existing semver tag found. Starting at ${new_tag}."
+          else
+            echo "INFO     | Latest tag: ${latest_tag}"
+            # Strip the leading 'v' and split into components.
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "${version}"
+            case "${bump}" in
+              major) major=$(( major + 1 )); minor=0; patch=0 ;;
+              minor) minor=$(( minor + 1 )); patch=0 ;;
+              patch) patch=$(( patch + 1 )) ;;
+            esac
+            new_tag="v${major}.${minor}.${patch}"
+          fi
+
+          echo "INFO     | New tag: ${new_tag}"
+          git tag "${new_tag}" "$(Build.SourceVersion)"
+          git push origin "${new_tag}"
+          echo "INFO     | Tag ${new_tag} pushed successfully."
+        displayName: Compute next version and push tag
+        env:
+          AZDO_PAT: $(AZDO_PAT)

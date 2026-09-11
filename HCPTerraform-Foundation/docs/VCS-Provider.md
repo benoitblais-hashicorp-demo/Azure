@@ -1,0 +1,128 @@
+# Set up the Azure DevOps Services VCS provider using OAuth
+
+> [!WARNING]
+> Configuring a new VCS provider requires permission to manage VCS settings for the organization.
+
+## Overview
+
+Complete the following steps to connect to Azure DevOps Services VCS:
+
+1. Enable third-party application access in Azure DevOps Services.
+2. In HCP Terraform or Terraform Enterprise, create a new connection and get the callback URL.
+3. Perform the following actions in your Microsoft Entra admin center:
+   - Create a new Microsoft Entra application.
+   - Provide the HCP Terraform or Terraform Enterprise callback URL.
+   - Retrieve the Microsoft Entra application ID, tenant ID, and tenant key.
+4. Perform the following actions in HCP Terraform or Terraform Enterprise:
+   - Provide the Microsoft Entra application ID, tenant ID, and tenant key.
+   - Request VCS access.
+5. On your VCS, approve the access request from HCP Terraform or Terraform Enterprise.
+6. On your VCS, connect Azure DevOps Organization to the Microsoft Entra Application.
+
+## Requirements
+
+Only Azure DevOps connections that use the `dev.azure.com` domain are supported. If your Azure DevOps project uses the older `visualstudio.com` domain, you must migrate using the steps in the [Microsoft documentation](https://learn.microsoft.com/en-us/azure/devops/release-notes/2018/sep-10-azure-devops-launch#administration).
+
+Configuring a new VCS provider requires permission to manage VCS settings for the organization.
+
+## Step 1: Enable third-party application access in Azure DevOps Services
+
+1. Log in to Azure DevOps Services.
+2. Click **Organization settings**.
+3. Click **Policies** under Security.
+4. Enable the **Third-party application access via OAuth** setting.
+
+## Step 2: Add a new VCS provider
+
+Complete the following steps in HCP Terraform or Terraform Enterprise:
+
+1. Sign in to [HCP Terraform](https://app.terraform.io) or Terraform Enterprise and navigate to the organization where you want to add the VCS provider.
+2. Choose **Settings** from the sidebar, then click **Providers**.
+3. Click **Add VCS Provider**. The VCS Providers page appears.
+4. Select **Azure DevOps** and then select **Azure DevOps Services** from the menu. The page moves to the next step.
+
+Leave this page open in a browser tab. You will copy values from this page into Azure DevOps in the next step, and in later steps you will continue configuring HCP Terraform.
+
+## Step 3: Create a new Microsoft Entra application
+
+Complete the following steps in your Microsoft Entra admin center:
+
+1. In a new browser tab, login to your [Microsoft Entra admin center](https://entra.microsoft.com).
+2. Open the **Applications** drop-down menu, then click **App registrations**. If you have access to multiple Entra tenants, switch to the tenant in which you want to register the application.
+3. Complete the following fields with the corresponding values currently displayed in your HCP Terraform or Terraform Enterprise browser tab:
+
+   | Field name | Value |
+   | --- | --- |
+   | Application Name | `HCP Terraform (<YOUR ORGANIZATION NAME>)` |
+   | Redirect URI | Choose **Web** from the drop-down and enter `https://app.terraform.io/<YOUR CALLBACK URL>` |
+
+4. Click **Register** to create the app.
+5. Once the app is registered, click **API permissions** under the **Manage** section from the application overview.
+6. Click **Azure DevOps**, then add `vso.code` and `vso.code_status` permissions.
+7. Click **Certificates and secrets**, then click the **Client secrets** tab.
+8. Click **New client secret** and complete the instructions when prompted to create a client secret.
+9. Click **Overview** and leave this page open in a browser tab. In the next step, you will copy and paste the unique **Application (client) ID**, **Directory (tenant) ID** and **Client Secret** from this page.
+
+## Step 4: Set up your provider
+
+Complete the following actions in HCP Terraform or Terraform Enterprise:
+
+1. (Optional) Enter a **Name** for this VCS connection.
+2. Enter your Azure DevOps Services application's **Application (client) ID**, **Directory (tenant) ID** and **Client Secret**. Get these values from the application's details in the open browser tab described in [Step 3](#step-3-create-a-new-microsoft-entra-application).
+3. Click **Connect and continue**. This action opens a page in Azure DevOps Services that prompts you to authorize the app.
+4. Click **Accept**. You are redirected back to HCP Terraform or Terraform Enterprise.
+
+> [!NOTE]
+> If you receive a 404 error from Azure DevOps Services, verify that your callback URL is configured correctly.
+
+## Configure advanced settings (optional)
+
+The following HCP Terraform and Terraform Enterprise settings are optional.
+
+- **Scope of VCS Provider**: You can configure which workspaces or Stacks can use repositories from this VCS provider. By default the **All Projects** option is selected, meaning this VCS provider is available to be used by all workspaces and Stacks in the organization.
+- **Set up SSH Keypair**: Most organizations do not need to add an SSH key. However, if the organization repositories include Git submodules that can only be accessed over SSH, an SSH key can be added along with the OAuth credentials. You can add or update the SSH key at a later time.
+
+If you don't need to configure the advanced settings, click **Skip and Finish**. HCP Terraform or Terraform Enterprise directs you to the VCS provider page, which now includes your new Azure DevOps Services client.
+
+## Limit the scope of the VCS provider
+
+Complete the following steps if you need to limit the scope of this VCS provider:
+
+1. Select the **Selected Projects** option and use the text field that appears to search for and select projects to enable. All current and future workspaces and Stacks for any selected projects can use repositories from this VCS Provider.
+2. Click the **Update VCS Provider** button to save your selections.
+
+## Create an SSH keypair
+
+HCP Terraform and Terraform Enterprise only use SSH keypairs to clone Git submodules. All other Git operations use HTTPS.
+
+> [!IMPORTANT]
+> Do not use your personal SSH key to connect Azure DevOps Services. Generate a new keypair or use an existing key reserved for service access.
+
+> [!WARNING]
+> Protect this private key carefully. Someone can use it to push code to the repositories you use to manage your infrastructure. Take note of your organization's policies for protecting important credentials and be sure to follow them.
+
+1. On a secure workstation, create an SSH keypair that HCP Terraform or Terraform Enterprise can use to connect to Azure DevOps Services. The following example uses the `ssh-keygen` command:
+
+   ```shell
+   ssh-keygen -t rsa -m PEM -f "/Users/<NAME>/.ssh/service_terraform" -C "service_terraform_enterprise"
+   ```
+
+   This SSH key must have an empty passphrase. HCP Terraform cannot use SSH keys that require a passphrase.
+
+2. Log into the Azure DevOps Services account you want HCP Terraform to act as.
+3. Navigate to the **SSH Keys** settings page.
+4. Add a new SSH key and paste the value of the SSH public key you created in step 1.
+5. In HCP Terraform, open the **Add VCS Provider** page.
+6. Provide the text of the SSH private key you created in step 1, then click **Add SSH Key**.
+
+## Step 5: Connect Azure DevOps Organization to the Microsoft Entra Application
+
+Ensure that the Azure DevOps organization you intend to link with HCP Terraform is connected to the correct Microsoft Entra app created in [Step 3](#step-3-create-a-new-microsoft-entra-application) by following the [Microsoft instructions](https://learn.microsoft.com/en-us/azure/devops/organizations/accounts/connect-organization-to-azure-ad).
+
+## Next steps
+
+After configuring Azure DevOps Services access for HCP Terraform, you can create workspaces or Stacks based on your organization's repositories.
+
+## Migrate existing workspaces to connect to ADO Organization with the new MS Entra App
+
+If you need to migrate existing workspaces to connect to ADO organization, go to the HCP Terraform workspaces associated with the Azure DevOps organization via legacy OAuth application, and update the VCS settings to use the new VCS provider created in [Step 3](#step-3-create-a-new-microsoft-entra-application).

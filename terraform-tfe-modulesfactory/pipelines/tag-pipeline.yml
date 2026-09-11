@@ -1,0 +1,134 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# tag-pipeline.yml
+#
+# Triggers when a semver tag (e.g. v1.2.3) is pushed to the repository.
+# Tags are created automatically by merge-pipeline.yml on every PR merge.
+#
+# This pipeline publishes the new version to the HCP Terraform private registry.
+# If the module has a linked no-code module, its version pin is updated too.
+#
+# Required pipeline variable group: "hcp-terraform"
+#   This variable group is created automatically by HCPTerraform-ModulesFactory via
+#   azuredevops_variable_group.hcp_terraform and is project-scoped, so it is available
+#   to every pipeline in the project — including pipelines in repositories created by
+#   the no-code module.
+#
+#   TFE_TOKEN       (secret) – HCP Terraform API token with Manage Modules permission
+#   TFC_ORGANIZATION         – HCP Terraform organization name
+#
+# Documentation:
+#   https://developer.hashicorp.com/terraform/cloud-docs/api-docs/private-registry/modules#create-a-module-version
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Tag version — $(Build.SourceBranchName)
+
+trigger:
+  branches:
+    exclude:
+      - '*'
+  tags:
+    include:
+      - 'v*.*.*'
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: hcp-terraform   # must contain TFE_TOKEN (secret) and TFC_ORGANIZATION
+
+jobs:
+  - job: publish_module_version
+    displayName: Publish module version
+    steps:
+
+      - checkout: self
+        displayName: Checkout repository
+
+      - bash: |
+          set -euo pipefail
+
+          tfc_api_url="https://app.terraform.io/api/v2"
+          auth_header="Authorization: Bearer $(TFE_TOKEN)"
+          content_header="Content-Type: application/vnd.api+json"
+
+          # Build.SourceBranchName contains "v1.2.3" for a tag trigger.
+          raw_tag="$(Build.SourceBranchName)"
+          version="${raw_tag#v}"
+          commit_sha="$(Build.SourceVersion)"
+
+          echo "INFO     | Tag:     ${raw_tag}"
+          echo "INFO     | Version: ${version}"
+          echo "INFO     | SHA:     ${commit_sha}"
+
+          # Derive module provider and name from the repository name convention:
+          #   terraform-<provider>-<name>
+          repo_name="$(Build.Repository.Name)"
+          echo "INFO     | Repository name: ${repo_name}"
+          IFS='-' read -r -a parts <<< "${repo_name}"
+          module_provider="${parts[1]}"
+          module_name=$(echo "${repo_name}" | sed -n "s/^.*-${module_provider}-//p")
+          echo "INFO     | Module provider: ${module_provider}"
+          echo "INFO     | Module name:     ${module_name}"
+
+          # Publish the new module version.
+          json_payload=$(jq -n \
+            --arg version "${version}" \
+            --arg commit_sha "${commit_sha}" \
+            '{"data":{"type":"registry-module-versions","attributes":{"version":$version,"commit_sha":$commit_sha}}}')
+
+          echo "INFO     | Publishing module version ${version}..."
+          response=$(curl -sS --request POST \
+            --url "${tfc_api_url}/organizations/$(TFC_ORGANIZATION)/registry-modules/private/$(TFC_ORGANIZATION)/${module_name}/${module_provider}/versions" \
+            --header "${auth_header}" --header "${content_header}" \
+            --data "${json_payload}")
+
+          if ! echo "${response}" | jq -e '.data' > /dev/null 2>&1; then
+            echo "ERROR    | Unable to publish new module version."
+            echo "${response}" | jq
+            exit 1
+          fi
+          echo "INFO     | Module version ${version} published successfully."
+
+          # Retrieve module details to check for a linked no-code module.
+          echo "INFO     | Retrieving module details..."
+          module_info=$(curl -sS --request GET \
+            --url "${tfc_api_url}/organizations/$(TFC_ORGANIZATION)/registry-modules/private/$(TFC_ORGANIZATION)/${module_name}/${module_provider}" \
+            --header "${auth_header}" --header "${content_header}")
+
+          if ! echo "${module_info}" | jq -e '.data' > /dev/null 2>&1; then
+            echo "ERROR    | Unable to retrieve module information."
+            echo "${module_info}" | jq
+            exit 1
+          fi
+
+          no_code_id=$(echo "${module_info}" | jq -r '.data.relationships."no-code-modules".data[0].id // empty')
+
+          if [[ -n "${no_code_id}" ]]; then
+            module_id=$(echo "${module_info}" | jq -r '.data.id')
+            echo "INFO     | No-code module ID: ${no_code_id}"
+            echo "INFO     | Pinning no-code module to version ${version}..."
+
+            nc_payload=$(jq -n \
+              --arg version "${version}" \
+              --arg module_id "${module_id}" \
+              '{"data":{"type":"no-code-modules","attributes":{"enabled":true,"version-pin":$version},"relationships":{"registry-module":{"data":{"id":$module_id,"type":"registry-module"}}}}}')
+
+            nc_response=$(curl -sS --request PATCH \
+              --url "${tfc_api_url}/no-code-modules/${no_code_id}" \
+              --header "${auth_header}" --header "${content_header}" \
+              --data "${nc_payload}")
+
+            if ! echo "${nc_response}" | jq -e '.data' > /dev/null 2>&1; then
+              echo "ERROR    | Unable to update no-code module version pin."
+              echo "${nc_response}" | jq
+              exit 1
+            fi
+            echo "INFO     | No-code module pinned to version ${version}."
+          else
+            echo "INFO     | Module has no linked no-code module. Nothing more to do."
+          fi
+        displayName: Publish module version to HCP Terraform
+        env:
+          TFE_TOKEN: $(TFE_TOKEN)

@@ -1,0 +1,38 @@
+# This policy uses the tfconfig/v2 import to require providers to have
+# version constraint, this is a good practise.
+
+# Import common-functions/tfconfig-functions/tfconfig-functions.sentinel
+# with alias "config"
+# import "tfconfig-functions" as config
+
+# Standard strings import
+import "tfconfig/v2" as tfconfig
+
+##### Functions #####
+
+### find_all_providers ###
+# Find all providers using the tfconfig/v2 import.
+find_all_providers = func() {
+	return tfconfig.providers
+}
+
+# Get all providers
+allProviders = find_all_providers()
+
+#Get all providers that has version_constraint as undefined or empty.
+#think it as : (mc.version_constrain else "") is ""
+#Exclude the "terraform" provider from this requirement
+violatingProviders = filter allProviders as address, mc {
+	mc.version_constraint else "" is "" and
+		mc.name is not "terraform"
+}
+
+# Print any violations
+for violatingProviders as address, mc {
+	print("Provider", address, "does not have version_constraint set")
+}
+
+# Main rule
+main = rule {
+	length(violatingProviders) is 0
+}

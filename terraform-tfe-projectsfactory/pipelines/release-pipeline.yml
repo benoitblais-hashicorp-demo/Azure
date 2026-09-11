@@ -1,0 +1,110 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# release-pipeline.yml
+#
+# Triggers automatically when the tag-pipeline completes successfully.
+# Checks out the tagged commit, creates a compressed archive of the module
+# source, computes its SHA-256 digest, and publishes the artifact to the
+# Azure DevOps pipeline artifact store for traceability.
+#
+# Note: the GitHub-specific steps from release.yml (actions/attest-build-provenance
+# and the GitHub Artifact Metadata storage-record API) have no equivalent in
+# Azure DevOps and are intentionally omitted. Azure Pipelines provides equivalent
+# traceability through its native Artifacts feed and pipeline run audit log.
+#
+# Required pipeline variable group: "hcp-terraform"
+#   This variable group is created automatically by HCPTerraform-ModulesFactory via
+#   azuredevops_variable_group.hcp_terraform and is project-scoped, so it is available
+#   to every pipeline in the project — including pipelines in repositories created by
+#   the no-code module.
+#
+#   TFE_TOKEN       (secret) – HCP Terraform API token
+#   TFC_ORGANIZATION         – HCP Terraform organization name
+#
+# Documentation:
+#   https://developer.hashicorp.com/terraform/cloud-docs/api-docs/private-registry/modules
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/artifacts/pipeline-artifacts
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Publish module release — $(resources.pipeline.tag-pipeline.runName)
+
+trigger: none
+pr:     none
+
+# Trigger when tag-pipeline completes successfully on a semver tag branch.
+# terraform-tfe-projectsfactory — tag-pipeline is replaced by the Terraform module (via replace()) with the
+# registered ADO pipeline name, e.g. "terraform-tfe-modulesfactory — tag-pipeline".
+resources:
+  pipelines:
+    - pipeline: tag-pipeline          # logical alias used below in this file
+      source: terraform-tfe-projectsfactory — tag-pipeline   # replaced by Terraform — matches the registered pipeline name
+      trigger:
+        branches:
+          include:
+            - refs/tags/v*.*.*
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: hcp-terraform   # must contain TFE_TOKEN (secret) and TFC_ORGANIZATION
+
+jobs:
+  - job: publish_module_release
+    displayName: Publish module release artifact
+    steps:
+
+      - checkout: self
+        displayName: Checkout repository
+        fetchDepth: 0   # full history required for git archive of the tag
+
+      - bash: |
+          set -euo pipefail
+
+          # The triggering pipeline ran on a tag ref — recover the tag from the
+          # resource pipeline's source branch name (e.g. "v1.2.3").
+          raw_tag="$(resources.pipeline.tag-pipeline.sourceBranch)"
+          # sourceBranch is "refs/tags/v1.2.3" when triggered by a tag.
+          raw_tag="${raw_tag#refs/tags/}"
+          version="${raw_tag#v}"
+
+          repo_name="$(Build.Repository.Name)"
+          echo "INFO     | Repository name: ${repo_name}"
+          echo "INFO     | Release tag:     ${raw_tag}"
+          echo "INFO     | Module version:  ${version}"
+
+          IFS='-' read -r -a parts <<< "${repo_name}"
+          module_provider="${parts[1]}"
+          module_name=$(echo "${repo_name}" | sed -n "s/^.*-${module_provider}-//p")
+          echo "INFO     | Module provider: ${module_provider}"
+          echo "INFO     | Module name:     ${module_name}"
+
+          # Verify the tag exists in the local clone.
+          git rev-parse --verify "refs/tags/${raw_tag}" > /dev/null
+
+          # Create a compressed archive of the module at the tagged commit.
+          archive_name="${module_name}-${version}.tar.gz"
+          git archive --format=tar.gz --output="$(Build.ArtifactStagingDirectory)/${archive_name}" "${raw_tag}"
+
+          local_digest="sha256:$(sha256sum "$(Build.ArtifactStagingDirectory)/${archive_name}" | awk '{print $1}')"
+          artifact_url="https://app.terraform.io/app/$(TFC_ORGANIZATION)/registry/modules/private/$(TFC_ORGANIZATION)/${module_name}/${module_provider}/${version}"
+
+          echo "INFO     | Archive:         ${archive_name}"
+          echo "INFO     | Digest:          ${local_digest}"
+          echo "INFO     | Registry URL:    ${artifact_url}"
+
+          # Persist values as pipeline variables for the publish step.
+          echo "##vso[task.setvariable variable=MODULE_PROVIDER]${module_provider}"
+          echo "##vso[task.setvariable variable=MODULE_NAME]${module_name}"
+          echo "##vso[task.setvariable variable=RELEASE_TAG]${raw_tag}"
+          echo "##vso[task.setvariable variable=VERSION]${version}"
+          echo "##vso[task.setvariable variable=LOCAL_DIGEST]${local_digest}"
+          echo "##vso[task.setvariable variable=ARTIFACT_URL]${artifact_url}"
+          echo "##vso[task.setvariable variable=ARCHIVE_NAME]${archive_name}"
+        displayName: Build module archive and compute digest
+
+      - task: PublishPipelineArtifact@1
+        displayName: Publish module archive as pipeline artifact
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/$(ARCHIVE_NAME)
+          artifactName: $(MODULE_NAME)-$(VERSION)
+          publishLocation: pipeline
